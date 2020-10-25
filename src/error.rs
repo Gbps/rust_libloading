@@ -83,6 +83,10 @@ pub enum Error {
         /// The source error.
         source: std::ffi::FromBytesWithNulError
     },
+    /// Call to `GetModuleInfo` failed
+    GetModuleInfo,
+    /// The signature object passed to the function is invalid
+    BadSignatureFormat
 }
 
 impl std::error::Error for Error {
@@ -125,6 +129,8 @@ impl std::fmt::Display for Error {
             CreateCStringWithTrailing { .. } =>
                 write!(f, "could not create a C string from bytes with trailing null"),
             IncompatibleSize => write!(f, "requested type cannot possibly work"),
+            GetModuleInfo => write!(f, "call to GetModuleInfo failed"),
+            BadSignatureFormat => write!(f, "signature format is invalid"),
         }
     }
 }

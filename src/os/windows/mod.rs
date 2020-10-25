@@ -29,7 +29,8 @@ mod windows_imports {
     pub(super) use self::winapi::shared::minwindef::{WORD, DWORD, HMODULE, FARPROC};
     pub(super) use self::winapi::shared::ntdef::WCHAR;
     pub(super) use self::winapi::shared::winerror;
-    pub(super) use self::winapi::um::{errhandlingapi, libloaderapi};
+    #[allow(unused_imports)]
+    pub(super) use self::winapi::um::{winbase, errhandlingapi, libloaderapi, psapi, processthreadsapi, winnt};
     pub(super) use std::os::windows::ffi::{OsStrExt, OsStringExt};
     pub(super) const SEM_FAILCE: DWORD = 1;
 
@@ -52,13 +53,25 @@ mod windows_imports {
 }
 
 use self::windows_imports::*;
+
 use util::{ensure_compatible_types, cstr_cow_from_bytes};
 use std::ffi::{OsStr, OsString};
 use std::{fmt, io, marker, mem, ptr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::raw::c_uchar;
 
 /// A platform-specific counterpart of the cross-platform [`Library`](crate::Library).
 pub struct Library(HMODULE);
+
+/// A sig-scanning signature
+pub enum SignatureItem
+{
+    /// A concrete byte in the signature
+    Byte(u8),
+
+    /// A wildcard character
+    Wildcard
+}
 
 unsafe impl Send for Library {}
 // Now, this is sort-of-tricky. MSDN documentation does not really make any claims as to safety of
@@ -146,6 +159,101 @@ impl Library {
         drop(wide_filename); // Drop wide_filename here to ensure it doesn’t get moved and dropped
                              // inside the closure by mistake. See comment inside the closure.
         ret
+    }
+
+    /// Scan for a function by signature
+    pub unsafe fn scan_for_function<T>(&self, signature: &[SignatureItem]) -> Result<Symbol<T>, crate::Error>
+    {
+        ensure_compatible_types::<T, FARPROC>()?;
+        let mut module_info = mem::MaybeUninit::<psapi::MODULEINFO>::uninit();
+
+        // get module information to get base and size of the module
+        let success = psapi::GetModuleInformation(
+            processthreadsapi::GetCurrentProcess(),
+            self.0,
+            module_info.as_mut_ptr().cast(),
+            mem::size_of_val(&module_info) as u32
+        );
+
+        if success == 0 {
+            return Err(crate::Error::GetModuleInfo);
+        }
+
+        // current position in the scan
+        let mut cur_loc: *const c_uchar = (*module_info.as_ptr()).lpBaseOfDll.cast();
+
+        // the end of the region of memory we're scanning
+        let end_mem: *const c_uchar = cur_loc
+            .add((*module_info.as_ptr()).SizeOfImage as usize)
+            .sub( signature.len())
+            .cast();
+
+        // get the first byte of the signature, ensure it's not a wildcard since that's invalid
+        if signature.len() <= 1 {
+            return Err(crate::Error::GetModuleInfo);
+        }
+
+        // get the first byte of the signature
+        let first_byte_u8: u8 = match &signature[0] {
+            SignatureItem::Wildcard => return Err(crate::Error::GetModuleInfo),
+            SignatureItem::Byte(byt) => byt.clone(),
+        };
+
+        let num_sig_bytes = signature.len();
+        let mut found ;
+
+        loop {
+            // read the first byte
+            let mut mem_byte = cur_loc.read();
+
+            // scan until we find one instance of the byte we care for
+            if mem_byte != first_byte_u8 {
+                cur_loc = cur_loc.add(1);
+                continue;
+            }
+
+            found = true;
+
+            // now go through each signature byte and make sure it matches
+            for idx in 1..num_sig_bytes {
+                match signature.get_unchecked(idx) {
+                    // byte we're looking for
+                    SignatureItem::Byte(byt) => {
+                        // read another byte
+                        mem_byte = cur_loc.add(idx).read();
+
+                        if byt.clone() != mem_byte {
+                            // not the byte we were looking for
+                            found = false;
+                            break;
+                        }
+                    }
+
+                    // skip the entry on wildcard
+                    SignatureItem::Wildcard => continue
+                }
+            }
+
+            if found {
+                // we found the signature we wanted!
+                return Ok(Symbol {
+                    pointer: (cur_loc as *mut c_uchar).cast(),
+                    pd: marker::PhantomData
+                })
+
+            } else {
+                // try the next location
+                cur_loc = cur_loc.add(1);
+            }
+
+            if cur_loc > end_mem {
+                // did not find the signature in the memory range
+                break;
+            }
+        }
+
+        // if we fall through to here, we did not find the signature
+        return Err(crate::Error::GetModuleInfo)
     }
 
     /// Get a pointer to function or static variable by symbol name.

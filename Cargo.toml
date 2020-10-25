@@ -19,6 +19,9 @@ features = [
     "winerror",
     "errhandlingapi",
     "libloaderapi",
+    "psapi",
+    "processthreadsapi",
+    "winbase",
 ]
 
 [target.'cfg(unix)'.dependencies.cfg-if]
